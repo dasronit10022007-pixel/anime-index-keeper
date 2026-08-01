@@ -7,36 +7,67 @@ on:
   workflow_dispatch: # Allows manual trigger anytime from GitHub UI
 
 jobs:
+  # -------------------------------------------------------------
+  # JOB 1: Automatically calculate how many 500-row batches we need
+  # -------------------------------------------------------------
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Supabase SDK
+        run: pip install supabase
+
+      - name: Calculate Batches from Supabase Row Count
+        id: set-matrix
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python -c '
+          import os, json, math
+          from supabase import create_client
+
+          url = os.environ.get("SUPABASE_URL")
+          key = os.environ.get("SUPABASE_KEY")
+          client = create_client(url, key)
+
+          # Query total row count from Supabase
+          res = client.table("episodes_v2").select("id", count="exact").limit(1).execute()
+          total = res.count if res.count is not None else 0
+
+          chunk_size = 500
+          chunks = math.ceil(total / chunk_size) if total > 0 else 1
+
+          # Build dynamic matrix JSON
+          matrix = {"include": [{"offset": i * chunk_size, "limit": chunk_size} for i in range(chunks)]}
+          print(f"Detected {total} total rows. Generated {chunks} matrix jobs.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+          '
+
+  # -------------------------------------------------------------
+  # JOB 2: Run all calculated batches in parallel
+  # -------------------------------------------------------------
   ping-videos:
+    needs: generate-matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        # Define offsets for each chunk (0 to 4000 in steps of 500)
-        include:
-          - offset: 0
-            limit: 500
-          - offset: 500
-            limit: 500
-          - offset: 1000
-            limit: 500
-          - offset: 1500
-            limit: 500
-          - offset: 2000
-            limit: 500
-          - offset: 2500
-            limit: 500
-          - offset: 3000
-            limit: 500
-          - offset: 3500
-            limit: 500
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
