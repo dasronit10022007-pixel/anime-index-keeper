@@ -2,14 +2,16 @@ name: Anime Index Keep Alive
 
 on:
   schedule:
-    # Runs at 00:00 UTC on the 1st and 15th of every month
     - cron: '0 0 1,15 * *'
-  workflow_dispatch: # Allows manual trigger anytime from GitHub UI
+  workflow_dispatch:
+    # NEW: This creates a text box on GitHub when you run it manually
+    inputs:
+      test_url:
+        description: 'Test a single URL (Leave blank to run full database)'
+        required: false
+        type: string
 
 jobs:
-  # -------------------------------------------------------------
-  # JOB 1: Automatically calculate how many 500-row batches we need
-  # -------------------------------------------------------------
   generate-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -23,38 +25,40 @@ jobs:
       - name: Install Supabase SDK
         run: pip install supabase
 
-      - name: Calculate Batches from Supabase Row Count
+      - name: Calculate Batches or Single URL
         id: set-matrix
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Pass the input URL to the Python script
+          TEST_URL: ${{ inputs.test_url }}
         run: |
           python -c '
           import os, json, math
           from supabase import create_client
 
-          url = os.environ.get("SUPABASE_URL")
-          key = os.environ.get("SUPABASE_KEY")
-          client = create_client(url, key)
-
-          # Query total row count from Supabase
-          res = client.table("episodes_v2").select("id", count="exact").limit(1).execute()
-          total = res.count if res.count is not None else 0
-
-          chunk_size = 500
-          chunks = math.ceil(total / chunk_size) if total > 0 else 1
-
-          # Build dynamic matrix JSON
-          matrix = {"include": [{"offset": i * chunk_size, "limit": chunk_size} for i in range(chunks)]}
-          print(f"Detected {total} total rows. Generated {chunks} matrix jobs.")
+          test_url = os.environ.get("TEST_URL")
+          
+          # If a user typed a test URL, only create 1 tiny job
+          if test_url and test_url.strip():
+              matrix = {"include": [{"offset": 0, "limit": 1, "test_url": test_url}]}
+              print("Single URL test mode activated.")
+          else:
+              # Otherwise, do the normal full database calculation
+              url = os.environ.get("SUPABASE_URL")
+              key = os.environ.get("SUPABASE_KEY")
+              client = create_client(url, key)
+              res = client.table("episodes_v2").select("id", count="exact").limit(1).execute()
+              total = res.count if res.count is not None else 0
+              chunk_size = 500
+              chunks = math.ceil(total / chunk_size) if total > 0 else 1
+              matrix = {"include": [{"offset": i * chunk_size, "limit": chunk_size, "test_url": ""} for i in range(chunks)]}
+              print(f"Detected {total} total rows. Generated {chunks} matrix jobs.")
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
           '
 
-  # -------------------------------------------------------------
-  # JOB 2: Run all calculated batches in parallel
-  # -------------------------------------------------------------
   ping-videos:
     needs: generate-matrix
     runs-on: ubuntu-latest
@@ -89,5 +93,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TEST_URL: ${{ matrix.test_url }}
         run: |
           python keep_alive.py --offset ${{ matrix.offset }} --limit ${{ matrix.limit }}
